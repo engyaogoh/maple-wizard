@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Maple Wizard Quest</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body{ height:100%; background:#2b6cb0; overflow:hidden;
+    font-family:'Segoe UI', tahoma, arial, sans-serif; touch-action:none; }
+  body{ display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  #wrap{ position:relative; box-shadow:0 12px 40px rgba(0,0,0,.45); border:6px solid #1d4e79; border-radius:14px; }
+  canvas{ display:block; background:#000; }
+  .hint{ color:#cfe6ff; font-size:13px; margin-top:10px; text-align:center; letter-spacing:.4px; }
+  .hint b{ color:#fff; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+<div class="hint"><b>← →</b> move &nbsp;|&nbsp; <b>↑ / Space</b> jump (double-jump!) &nbsp;|&nbsp; <b>Z / Click</b> cast magic &nbsp;—&nbsp; defeat all monsters, then enter the portal</div>
+<script>
+"use strict";
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+
+// ---------------- Input ----------------
+const keys = {};
+addEventListener('keydown', e=>{ keys[e.code]=true; onKey(e.code); if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault(); });
+addEventListener('keyup',   e=>{ keys[e.code]=false; });
+addEventListener('blur', ()=> { for(const k in keys) keys[k]=false; });
+
+// ---------------- Audio (tiny synth) ----------------
+let AC=null;
+function ac(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } return AC; }
+function tone(f, dur, type='square', vol=.06, slide=0){
+  const c=ac(); if(!c) return;
+  const o=c.createOscillator(), g=c.createGain();
+  o.type=type; o.frequency.value=f;
+  if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(40,f+slide), c.currentTime+dur);
+  g.gain.value=0; g.gain.linearRampToValueAtTime(vol, c.currentTime+.01);
+  g.gain.exponentialRampToValueAtTime(.0001, c.currentTime+dur);
+  o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime+dur);
+}
+const sfx={ shoot:()=>tone(880,.12,'square',.05,260), hit:()=>tone(220,.15,'sawtooth',.06,-120),
+  jump:()=>tone(400,.14,'sine',.06,260), hurt:()=>tone(150,.25,'sawtooth',.08,-60),
+  clear:()=>[523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,.18,'triangle',.07),i*110)),
+  dead:()=>{ for(let i=0;i<5;i++) setTimeout(()=>tone(300-i*40,.2,'sawtooth',.07,-40),i*120); },
+  portal:()=>[392,523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,.15,'sine',.08),i*90)) };
+
+// ---------------- Game state ----------------
+let state = 'menu';           // menu | play | clear | over | win
+let level = 0;
+let player, monsters, bolts, mbolts, parts, texts;
+let camX=0, camY=0, shake=0;
+let time=0, menuSel=0, clearMsgT=0;
+const LEVELS = 3;
+
+// ---------------- Level definitions ----------------
+// each platform: [x,y,w,h]. world width = 2400
+const LEVEL_DEF = [
+  { // Level 1 — Maple Hill, snails & slimes
+    theme:{ sky:['#9bd4ff','#cdeeff','#fff0d4'], ground:'#7ec850', dirt:'#8a5a2b',
+            hill:'#a8d870', hill2:'#8fc35c', tree:'#5ea63f' },
+    playerStart:[180, 380],
+    groundY: 465,
+    platforms:[
+      [0,465,3000,120],          // ground
+      [380,380,150,20],[620,330,150,20],[880,400,150,20],
+      [1200,340,160,20],[1480,300,160,20],[1800,380,150,20],
+      [2050,330,180,20]
+    ],
+    monsters: [
+      {t:'snail', x:420,  y:0}, {t:'snail', x:900,  y:0}, {t:'snail', x:1400, y:0},
+      {t:'slime', x:600,  y:0}, {t:'slime', x:1550, y:0}, {t:'slime', x:2100, y:0},
+      {t:'snail', x:1850, y:0}
+    ],
+    portal: [2300, 465-70],
+    name:"Maple Hill"
+  },
+  { // Level 2 — Mushroom Meadow, mushrooms appear
+    theme:{ sky:['#8ec9ff','#d9f0ff','#ffe9c2'], ground:'#72cd58', dirt:'#8a5a2b',
+            hill:'#9fcf6e', hill2:'#86bd58', tree:'#5ea63f' },
+    playerStart:[180, 380],
+    groundY: 465,
+    platforms:[
+      [0,465,3000,120],
+      [300,400,150,20],[560,330,150,20],[830,400,150,20],
+      [1120,340,160,20],[1380,270,160,20],[1660,360,170,20],
+      [1980,330,180,20],[2280,380,180,20]
+    ],
+    monsters: [
+      {t:'snail', x:340, y:0}, {t:'slime', x:600, y:0}, {t:'mushroom', x:900, y:0},
+      {t:'mushroom', x:1180, y:0}, {t:'slime', x:1450, y:0}, {t:'snail', x:1700, y:0},
+      {t:'mushroom', x:2050, y:0}, {t:'mushroom', x:2350, y:0}
+    ],
+    portal: [2320, 465-70],
+    name:"Mushroom Meadow"
+  },
+  { // Level 3 — Wraith Woods, ranged enemies
+    theme:{ sky:['#6f9fd8','#a9c8ea','#d9c8a8'], ground:'#67c852', dirt:'#7a4f26',
+            hill:'#8fc765', hill2:'#74ac4c', tree:'#468b34' },
+    playerStart:[180, 380],
+    groundY: 465,
+    platforms:[
+      [0,465,3000,120],
+      [280,400,150,20],[520,320,150,20],[800,250,160,20],[1050,400,150,20],
+      [1280,330,160,20],[1520,250,160,20],[1780,360,170,20],
+      [2060,330,180,20],[2360,290,180,20]
+    ],
+    monsters: [
+      {t:'slime', x:320, y:0}, {t:'wraith', x:560, y:0}, {t:'mushroom', x:860, y:0},
+      {t:'wraith', x:1120, y:0}, {t:'snail', x:1350, y:0}, {t:'wraith', x:1600, y:0},
+      {t:'mushroom', x:1850, y:0}, {t:'wraith', x:2120, y:0}, {t:'mushroom', x:2420, y:0}
+    ],
+    portal: [2400, 465-70],
+    name:"Wraith Woods"
+  }
+];
+
+function loadLevel(i){
+  const L = LEVEL_DEF[i];
+  level = i;
+  player = { x:L.playerStart[0], y:L.playerStart[1], w:44, h:60, vx:0, vy:0,
+             face:1, onGround:false, jumps:0, hp:100, maxHp:100, inv:0,
+             anim:0, cast:0, dead:false };
+  monsters = [];
+  for(const m of L.monsters){
+    const Y = (m.t==='wraith') ? m.y+40 : m.y;
+    const base = { t:m.t, x:m.x, y:Y, w:44, h:40, vx:0, vy:0, hp:HPMAP[m.t],
+                   maxhp:HPMAP[m.t], face:Math.random()<.5?-1:1, dir:1,
+                   onGround:false, anim:Math.random()*10, atkCd:1+Math.random(), homeY:Y,
+                   hopT:0, dead:false, fade:1 };
+    if(m.t==='slime'){ base.w=46; base.h=40; }
+    if(m.t==='mushroom'){ base.w=46; base.h=52; }
+    if(m.t==='wraith'){ base.w=44; base.h=50; }
+    monsters.push(base);
+  }
+  bolts=[]; mbolts=[]; parts=[]; texts=[];
+  camX = clamp(player.x - W*0.3, 0, 2400-W);
+  camY = 0; shake=0;
+  state='play';
+}
+const HPMAP = { snail:2, slime:4, mushroom:5, wraith:6 };
+
+// ---------------- helpers ----------------
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function lerp(a,b,t){ return a+(b-a)*t; }
+function rnd(a,b){ return a+Math.random()*(b-a); }
+function aabb(a,b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+
+// ---------------- Collision / movement ----------------
+function solids(){
+  const L = LEVEL_DEF[level];
+  return L.platforms;
+}
+// move entity, resolve vs platforms (solid slabs)
+function moveEntity(e){
+  // horizontal
+  e.x += e.vx*dt;
+  let eps = 1;
+  for(const s of solids()){
+    if(e.vy >= 0){
+      // standing check handled below
+    }
+    if(e.vx>0 && e.x+e.w > s[0]+eps && e.x+e.w < s[0]+s[2]+eps*2 && e.y+e.h > s[1]+eps && e.y < s[1]+s[3]-eps){
+      e.x = s[0]-e.w; e.vx = 0;
+    } else if(e.vx<0 && e.x < s[0]+s[2]-eps && e.x > s[0]+s[2]-eps*3 && e.y+e.h > s[1]+eps && e.y < s[1]+s[3]-eps){
+      e.x = s[0]+s[2]; e.vx = 0;
+    }
+  }
+  // vertical
+  e.vy += GRAVITY*dt;
+  e.y += e.vy*dt;
+  e.onGround = false;
+  for(const s of solids()){
+    // landing on top
+    if(e.vy>=0 && e.y+e.h >= s[1]-eps && e.y+e.h <= s[1]+eps+Math.abs(e.vy*dt)+4 &&
+       e.x+e.w > s[0]+3 && e.x < s[0]+s[2]-3){
+      e.y = s[1]-e.h; e.vy=0; e.onGround=true;
+    }
+    // head bump
+    else if(e.vy<0 && e.y <= s[1]+s[3]+eps && e.y >= s[1]+s[3]-Math.abs(e.vy*dt)-4 &&
+       e.x+e.w > s[0]+3 && e.x < s[0]+s[2]-3){
+      e.y = s[1]+s[3]; e.vy = 0;
+    }
+  }
+  // world bounds
+  e.x = clamp(e.x, 0, 2400-e.w);
+  if(e.y > 900){ if(e===player){ state='over'; } else { e.dead=true; } }
+}
+
+// ---------------- Player update ----------------
+function updatePlayer(){
+  if(player.inv>0) player.inv-=dt;
+  if(player.cast>0) player.cast-=dt;
+  const L=LEVEL_DEF[level];
+  let ax = 0;
+  if(keys['ArrowLeft']||keys['KeyA']) ax -= 1;
+  if(keys['ArrowRight']||keys['KeyD']) ax += 1;
+  const speed = 280;
+  player.vx = lerp(player.vx, ax*speed, 1-Math.pow(.0001,dt));
+  if(ax!==0) player.face = ax>0?1:-1;
+
+  if((keys['ArrowUp']||keys['KeyW']||keys['Space']) && wasJumpPress){
+    if(player.onGround){ player.vy = -640; player.jumps=1; player.onGround=false; sfx.jump(); }
+    else if(player.jumps<2 && !keyJumpHeld){ player.vy = -560; player.jumps++; sfx.jump(); }
+    wasJumpPress=false; keyJumpHeld=true;
+  }
+  if(!(keys['ArrowUp']||keys['KeyW']||keys['Space'])) keyJumpHeld=false;
+
+  // shoot
+  if(shootPressed){
+    shootPressed=false;
+    fireBolt();
+  }
+
+  moveEntity(player);
+  player.anim += Math.abs(ax)*dt*6 + (player.onGround?0:0);
+  if(!player.onGround) player.anim += dt*2;
+
+  // touch damage from monsters
+  for(const m of monsters){
+    if(m.dead || m.fade<=0) continue;
+    if(aabb(player, m) && player.inv<=0){
+      damagePlayer(14);
+      const kb = player.face;
+      player.vx = -kb*220; player.vy = -260; player.inv=1.2;
+    }
+  }
+}
+
+function fireBolt(){
+  if(player.dead) return;
+  player.cast = 0.28;
+  sfx.shoot();
+  bolts.push({ x:player.x+player.w/2 + player.face*26, y:player.y+20,
+               w:18, h:18, vx:player.face*540, vy:0, life:1.1, pierce:0 });
+}
+function damagePlayer(d){
+  if(player.inv>0) return;
+  player.hp -= d; player.inv=1.2; shake=.35; sfx.hurt();
+  spawnParts(player.x+player.w/2, player.y+player.h/2, '#ffd24d', 14);
+  texts.push({x:player.x+player.w/2, y:player.y-10, str:'-'+d, col:'#ff5b5b', t:0, vy:-60});
+  if(player.hp<=0){ player.hp=0; player.dead=true; state='over'; sfx.dead(); }
+}
+
+// ---------------- Monster update ----------------
+function updateMonster(m){
+  if(m.dead){
+    m.fade -= dt*2;
+    return;
+  }
+  m.atkCd -= dt;
+  const L=LEVEL_DEF[level];
+  if(m.t==='wraith'){
+    // float toward player, keep some altitude
+    const px = player.x+player.w/2, py = player.y+player.h/2;
+    const dx = px - (m.x+m.w/2);
+    floatY(m);
+    m.vx = clamp(dx*1.1, -90, 90);
+    if(m.x < player.x) m.face=1; else m.face=-1;
+    m.x += m.vx*dt;
+    // fire bolt
+    if(m.atkCd<=0 && Math.abs(dx) < 520 && Math.abs(py-(m.y+m.h/2))<260){
+      m.atkCd = 2.2;
+      const ang = Math.atan2(py-(m.y+m.h/2), dx);
+      mbolts.push({ x:m.x+m.w/2, y:m.y+m.h/2, w:14,h:14, vx:Math.cos(ang)*210, vy:Math.sin(ang)*210, life:3 });
+    }
+  } else {
+    // ground patrol on a platform / ground
+    if(m.onGround) m.vx = (m.t==='slime'?70:55)* (m.dir);
+    m.vx *= 1; if(!m.onGround && m.t!=='slime') m.vx = 0;
+    // slime hop
+    if(m.t==='slime'){
+      m.hopT -= dt;
+      if(m.onGround && m.hopT<=0){ m.vy=-340; m.hopT=1.6; }
+    }
+    moveEntity(m);
+    // turn at platform edge or wall
+    if(m.t!=='slime'){
+      const aheadFeetY = m.y+m.h+4;
+      const below = solids().some(s=> m.x+m.w/2+m.dir*26 > s[0] && m.x+m.w/2+m.dir*26 < s[0]+s[2] && aheadFeetY > s[1]-2 && aheadFeetY < s[1]+12);
+      m.dir = below? m.dir : -m.dir;
+      m.face = m.dir;
+    }
+    if(m.t==='slime'){ m.face = player.x > m.x ? 1 : -1; }
+  }
+  m.anim += dt;
+  // collide with player bolts
+  for(let bi=bolts.length-1; bi>=0; bi--){
+    const b=bolts[bi];
+    if( aabb(m, b) ){
+      bolts.splice(bi,1);
+      m.hp -= 3;
+      spawnParts(b.x,b.y,'#9be7ff',8);
+      m.vx += (b.vx>0?1:-1)*120;
+      texts.push({x:m.x+m.w/2,y:m.y-8,str:'-3',col:'#fff',t:0,vy:-55});
+      if(m.hp<=0){ m.dead=true; sfx.hit(); popDrop(m); scoreEnd(); }
+    }
+  }
+}
+
+function floatY(m){
+  // gentle sine bob around home altitude
+  m.y = m.homeY + Math.sin(time*2 + m.x*.02)*18 + Math.sin(time*3+m.anim)*8;
+}
+function popDrop(m){
+  spawnParts(m.x+m.w/2, m.y+m.h/2, '#ffd24d', 10);
+  spawnParts(m.x+m.w/2, m.y+m.h/2, '#9be7ff', 6);
+  sfx.hit();
+}
+function scoreEnd(){
+  // check level clear
+  if(monsters.every(x=>x.dead)){
+    texts.push({x:player.x,y:player.y-40,str:'All foes cleared!',col:'#ffe14d',t:0,vy:-30,big:true});
+  }
+}
+
+// ---------------- Effects ----------------
+function spawnParts(x,y,col,n){
+  for(let i=0;i<n;i++){
+    const a=rnd(0,Math.PI*2), s=rnd(60,260);
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-60,col,t:0,life:rnd(.4,.8),s:rnd(2,5)});
+  }
+}
+
+// ---------------- Game loop ----------------
+let dt=0, wasJumpPress=false, keyJumpHeld=false, shootPressed=false;
+function onKey(code){
+  if(code==='ArrowUp'||code==='KeyW'||code==='Space'){ wasJumpPress=true; keyJumpHeld=true; }
+  if(code==='KeyZ'||code==='KeyX'||code==='KeyJ'){
+    if(state==='play') shootPressed=true;
+  }
+  if(code==='Enter'){
+    if(state==='menu') loadLevel(0);
+    else if(state==='over'||state==='win') state='menu';
+  }
+}
+cv.addEventListener('click', ()=>{
+  if(state==='menu'){ loadLevel(0); return; }
+  if(state==='play'){ shootPressed=true; }
+  if(state==='over'||state==='win'){ state='menu'; }
+});
+cv.addEventListener('mousedown', ()=>{ if(state==='play') shootPressed=true; });
+
+const GRAVITY = 1500;
+let last=0;
+function loop(ts){
+  dt = Math.min((ts-last)/1000 || .016, .05);
+  last = ts;
+  time += dt;
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+function update(){
+  if(state==='play'){
+    updatePlayer();
+    for(const m of monsters) updateMonster(m);
+    monsters = monsters.filter(m=>m.fade>0);
+    // bolts
+    for(let i=bolts.length-1;i>=0;i--){
+      const b=bolts[i];
+      b.x+=b.vx*dt; b.y+=b.vy*dt; b.life-=dt;
+      if(b.life<=0||b.x<-40||b.x>2440){ bolts.splice(i,1); continue; }
+    }
+    updateBolts();
+    // monster bolts
+    for(let i=mbolts.length-1;i>=0;i--){
+      const b=mbolts[i];
+      b.x+=b.vx*dt; b.y+=b.vy*dt; b.life-=dt;
+      if(b.life<=0){ mbolts.splice(i,1); continue; }
+      if(player.inv<=0 && aabb(player,b)){
+        mbolts.splice(i,1); damagePlayer(10);
+      }
+      if(solids().some(s=> s[0]<b.x && b.x<s[0]+s[2] && s[1]<b.y && b.y<s[1]+s[3])) mbolts.splice(i,1);
+    }
+    // particles
+    for(let i=parts.length-1;i>=0;i--){ const p=parts[i]; p.t+=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=900*dt; if(p.t>p.life) parts.splice(i,1); }
+    for(let i=texts.length-1;i>=0;i--){ const t=texts[i]; t.t+=dt; t.y+=t.vy*dt; t.vy*=.96; if(t.t>1) texts.splice(i,1); }
+    // portal
+    const L=LEVEL_DEF[level];
+    const pr=[L.portal[0],L.portal[1]];
+    if(monsters.every(m=>m.dead) && Math.abs((player.x+player.w/2)-(pr[0]+28))<34 && Math.abs((player.y+player.h)-(pr[1]+70))<50){
+      sfx.portal();
+      if(level < LEVELS-1){ level++; loadLevel(level); texts.push({x:player.x,y:player.y-40,str:'Level '+ (level+1),col:'#ffe14d',t:0,vy:-30,big:true}); }
+      else { state='win'; sfx.clear(); }
+    }
+    // camera
+    camX = lerp(camX, clamp(player.x - W*0.35, 0, 2400-W), 1-Math.pow(.001,dt));
+    camY = 0;
+  }
+  if(shake>0) shake-=dt;
+}
+function updateBolts(){
+  for(let i=bolts.length-1;i>=0;i--){
+    const b=bolts[i];
+    if(solids().some(s=> s[0]<b.x && b.x<s[0]+s[2] && s[1]<b.y && b.y<s[1]+s[3])){
+      spawnParts(b.x,b.y,'#9be7ff',5); bolts.splice(i,1);
+    }
+  }
+}
+
+// ---------------- Drawing ----------------
+function draw(){
+  ctx.fillStyle='#1a4a7a'; ctx.fillRect(0,0,W,H);
+  if(state==='menu'){ drawMenu(); return; }
+  ctx.save();
+  if(shake>0){ ctx.translate(rnd(-4,4)*shake*6, rnd(-4,4)*shake*6); }
+  ctx.translate(-camX, -camY);
+  const L = LEVEL_DEF[level];
+  drawBackground(L);
+  // portal
+  if(monsters.every(m=>m.dead)) drawPortal(L.portal[0], L.portal[1], true);
+  else drawPortal(L.portal[0], L.portal[1], false);
+  // platforms
+  for(const s of solids()) drawPlatform(s, L);
+  // monsters
+  for(const m of [...monsters].sort((a,b)=>a.y-b.y)) drawMonster(m);
+  // player
+  if(!player.dead) drawPlayer();
+  // bolts
+  for(const b of bolts) drawBolt(b);
+  for(const b of mbolts) drawMBolt(b);
+  // fx
+  for(const p of parts){ ctx.globalAlpha=Math.max(0,1-p.t/p.life); ctx.fillStyle=p.col; ctx.beginPath(); ctx.arc(p.x,p.y,p.s,0,7); ctx.fill(); }
+  ctx.globalAlpha=1;
+  for(const t of texts){ ctx.globalAlpha=Math.max(0,1-t.t); ctx.font=(t.big?'bold 26px':'bold 18px')+' Segoe UI'; ctx.textAlign='center'; ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillText(t.str,t.x+2,t.y+2); ctx.fillStyle=t.col; ctx.fillText(t.str,t.x,t.y); }
+  ctx.globalAlpha=1;
+  ctx.restore();
+
+  // HUD
+  drawHUD();
+  if(state==='over') drawOverlay('Game Over','Press Enter or Click to retry','#7a1d1d','#ff8a8a');
+  else if(state==='win') drawOverlay('Victory!','The Maple grove is safe. Press Enter','#1d4e7a','#ffe14d');
+}
+function drawBackground(L){
+  const th=L.theme;
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,th.sky[0]); g.addColorStop(.7,th.sky[1]); g.addColorStop(1,th.sky[2]);
+  ctx.fillStyle=g; ctx.fillRect(camX-10,camY-10,W+20,H+20);
+  // sun
+  ctx.fillStyle='rgba(255,244,180,.9)'; ctx.beginPath(); ctx.arc(camX+W-140, camY+90, 46,0,7); ctx.fill();
+  ctx.fillStyle='rgba(255,250,220,.4)'; ctx.beginPath(); ctx.arc(camX+W-140, camY+90, 66,0,7); ctx.fill();
+  // clouds (parallax)
+  for(let i=0;i<6;i++){
+    const cx=(i*420+camX*0.08)%(W+300)-150;
+    drawCloud(camX+cx, camY+60+(i%3)*44);
+  }
+  // distant hills
+  for(let rep=-1; rep<3; rep++){
+    const hx = camX*0.15 + rep*700;
+    ctx.fillStyle=th.hill2; roundedHill(hx-350, camY+330, 700,150);
+    ctx.fillStyle=th.hill;  roundedHill(hx-180+100, camY+350, 620,130);
+  }
+  // trees
+  for(let rep=-1; rep<3; rep++){
+    const tx = camX*0.3 + rep*420;
+    drawTree(camX+tx, camY+300, 90, th.tree);
+  }
+  // ground fill
+  ctx.fillStyle=th.ground; ctx.fillRect(camX-10, L.groundY+40, W+1500, H-camY);
+}
+function roundedHill(x,y,w,h){
+  ctx.beginPath(); ctx.moveTo(x,y); ctx.quadraticCurveTo(x+w/2,y-h,x+w,y); ctx.closePath(); ctx.fill();
+}
+function drawCloud(cx,cy){
+  ctx.fillStyle='rgba(255,255,255,.85)';
+  ctx.beginPath(); ctx.arc(cx,cy,20,0,7); ctx.arc(cx+24,cy-8,26,0,7); ctx.arc(cx+52,cy,20,0,7); ctx.arc(cx+26,cy+8,20,0,7); ctx.fill();
+}
+function drawTree(x,y,size,color){
+  ctx.fillStyle='#6b4a2b'; ctx.fillRect(x-8,y+20,16,size*.6);
+  ctx.fillStyle=color;
+  ctx.beginPath(); ctx.arc(x,y+14,26,0,7); ctx.arc(x-24,y+20,20,0,7); ctx.arc(x+24,y+20,20,0,7); ctx.fill();
+}
+function drawPlatform(s,L){
+  const g=ctx.createLinearGradient(0,s[1],0,s[1]+s[3]);
+  g.addColorStop(0,L.theme.ground); g.addColorStop(1,L.theme.dirt);
+  ctx.fillStyle=g; ctx.fillRect(s[0],s[1],s[2],s[3]);
+  ctx.fillStyle='rgba(255,255,255,.18)';
+  for(let i=0;i<s[2];i+=18) ctx.fillRect(s[0]+i,s[1],9,5);
+  // grass tufts
+  ctx.fillStyle='#5cb13c';
+  for(let i=0;i<s[2];i+=34){ ctx.beginPath(); ctx.moveTo(s[0]+i,s[1]); ctx.lineTo(s[0]+i+5,s[1]-8); ctx.lineTo(s[0]+i+10,s[1]); ctx.fill(); }
+}
+function drawPortal(x,y,open){
+  const pulse = open? (0.6+0.4*Math.sin(time*6)) : 0.4;
+  ctx.save(); ctx.translate(x,y);
+  ctx.fillStyle='rgba(30,30,40,.6)';
+  roundRect(ctx,-6,0,68,96,8); ctx.fill();
+  ctx.strokeStyle='#3a2a1a'; ctx.lineWidth=4; ctx.strokeRect(-3,2,62,92);
+  const g=ctx.createLinearGradient(0,0,0,96);
+  if(open){ g.addColorStop(0,'#7ef2ff'); g.addColorStop(.5,'#3fa9ff'); g.addColorStop(1,'#7a5bff'); }
+  else { g.addColorStop(0,'#444'); g.addColorStop(1,'#222'); }
+  ctx.globalAlpha=pulse; ctx.fillStyle=g; ctx.fillRect(2,6,52,84);
+  ctx.globalAlpha=1;
+  ctx.fillStyle='#ffd24d'; ctx.font='bold 11px arial'; ctx.textAlign='center';
+  ctx.fillText(open?'GO!':'',34,50);
+  ctx.restore();
+}
+function drawBolt(b){
+  ctx.save(); ctx.translate(b.x+b.w/2,b.y+b.h/2);
+  ctx.rotate(Math.atan2(b.vy,b.vx));
+  ctx.fillStyle='#9be7ff'; ctx.beginPath(); ctx.ellipse(0,0,12,6,0,0,7); ctx.fill();
+  ctx.fillStyle='#eafcff'; ctx.beginPath(); ctx.arc(4,0,3,0,7); ctx.fill();
+  ctx.restore();
+}
+function drawMBolt(b){
+  ctx.save(); ctx.translate(b.x+b.w/2,b.y+b.h/2);
+  ctx.rotate(Math.atan2(b.vy,b.vx));
+  ctx.fillStyle='#c98bff'; ctx.beginPath(); ctx.arc(0,0,7,0,7); ctx.fill();
+  ctx.fillStyle='#f0dcff'; ctx.beginPath(); ctx.arc(0,0,3,0,7); ctx.fill();
+  ctx.restore();
+}
+function roundRect(c,x,y,w,h,r){ c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); }
+
+// ---------------- HUD ----------------
+function drawHUD(){
+  ctx.fillStyle='rgba(0,0,0,.4)'; ctx.fillRect(0,0,W,54);
+  // HP
+  ctx.fillStyle='#3a1010'; roundRect(ctx,14,12,280,26,13); ctx.fill();
+  ctx.fillStyle='#ff4d4d'; roundRect(ctx,16,14,Math.max(0,(276)*player.hp/player.maxHp),22,11); ctx.fill();
+  const g=ctx.createLinearGradient(0,14,0,36); g.addColorStop(0,'rgba(255,255,255,.5)'); g.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=g; roundRect(ctx,16,14,Math.max(0,(276)*player.hp/player.maxHp),22,11); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.font='bold 13px Segoe UI'; ctx.textAlign='left'; ctx.fillText('HP',26,30);
+  // level
+  ctx.fillStyle='#2a7dff'; ctx.font='bold 22px Segoe UI'; ctx.textAlign='center';
+  ctx.fillText('Level '+(level+1), W/2, 35);
+  ctx.fillStyle='#cfe6ff'; ctx.font='14px Segoe UI'; ctx.fillText(LEVEL_DEF[level].name, W/2, 50);
+  // monsters left
+  const left = monsters.filter(m=>!m.dead).length;
+  ctx.textAlign='right'; ctx.fillStyle='#ffe14d'; ctx.font='bold 16px Segoe UI';
+  ctx.fillText('☠ '+left, W-16, 33);
+}
+function drawOverlay(title,sub,col,titleCol){
+  ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle=titleCol; ctx.font='bold 64px Segoe UI'; ctx.textAlign='center';
+  ctx.shadowColor='rgba(0,0,0,.5)'; ctx.shadowBlur=12; ctx.fillText(title,W/2,H/2-40); ctx.shadowBlur=0;
+  ctx.fillStyle='#fff'; ctx.font='22px Segoe UI'; ctx.fillText(sub,W/2,H/2+30);
+}
+function drawMenu(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#9bd4ff'); g.addColorStop(.6,'#d9f0ff'); g.addColorStop(1,'#ffe9c2');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  drawCloud(120,100); drawCloud(500,70); drawCloud(790,120);
+  roundedHill(0,H,400,150); ctx.fillStyle='#8fc35c'; roundedHill(150,H,500,180);
+  ctx.fillStyle='#7ec850'; ctx.fillRect(0,H-90,W,90);
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold 74px '; ctx.font='bold 74px Segoe UI';
+  ctx.shadowColor='rgba(0,0,0,.3)'; ctx.shadowOffsetY=6; ctx.fillText('Maple Wizard',W/2,180);
+  ctx.font='bold 30px Segoe UI'; ctx.fillStyle='#315d8f'; ctx.shadowOffsetY=0; ctx.fillText('Quest',W/2,222);
+  // hero preview
+  drawWizard(W/2-22, 300, 1, 0, 2, 0.28, 44, 64);
+  // start button
+  const pulse = 1+0.06*Math.sin(time*4);
+  ctx.font='bold 30px Segoe UI'; ctx.fillStyle='#ff9f1c';
+  ctx.shadowColor='rgba(0,0,0,.3)'; ctx.shadowBlur=10;
+  ctx.fillText('▶  Click or press Enter to play', W/2, 470+pulse);
+  ctx.shadowBlur=0;
+  ctx.font='15px Segoe UI'; ctx.fillStyle='#315d8f';
+  ctx.fillText('A MapleStory-style demo · Wizard vs Monsters · 3 levels', W/2, 510);
+}
+
+// ---------------- Character drawing ----------------
+// drawWizard(x,y,face,animState,animPhase, cast, w, h)
+// x,y = top-left of sprite box. face: 1 right, -1 left
+function drawWizard(x,y,face,state,anim,cast,w,h){
+  ctx.save();
+  ctx.translate(x+w/2, y+h);
+  ctx.scale(face,1);
+  // state: 0 idle,1 run,2 jump
+  const bob = (state===0)? Math.sin(anim*2)*2 : 0;
+  const legSwing = state===1? Math.sin(anim*8)*6 : 0;
+  ctx.translate(0, bob);
+  const skin='#ffd9a8', robe='#2b6fff', robeDark='#1c4fbf', hat='#1f4fd0', hatDark='#163a9c',
+        hair='#7a4a23', staff='#8a5a2b';
+  // legs
+  ctx.fillStyle='#4a3420';
+  ctx.fillRect(-13, -16, 11+legSwing, 16);          // back leg
+  ctx.fillRect(2-legSwing, -16, 11+legSwing, 16);   // front leg
+  ctx.fillStyle='#3a2818';
+  ctx.fillRect(-13, -2, 11+legSwing, 4); ctx.fillRect(2-legSwing,-2,11+legSwing,4);
+  // robe (trapezoid bottom)
+  ctx.fillStyle=robe;
+  ctx.beginPath();
+  ctx.moveTo(-20,-16); ctx.lineTo(20,-16); ctx.lineTo(27,-2); ctx.lineTo(-27,-2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle=robeDark;
+  ctx.beginPath(); ctx.moveTo(-27,-2); ctx.lineTo(27,-2); ctx.lineTo(24,4); ctx.lineTo(-24,4); ctx.closePath(); ctx.fill();
+  // belt
+  ctx.fillStyle='#ffd24d'; ctx.fillRect(-20,-14,40,4);
+  // arms + staff
+  // staff held in front
+  const staffTilt = cast>0 ? -0.5 : -0.15;
+  ctx.strokeStyle=staff; ctx.lineWidth=5; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(6,0); ctx.quadraticCurveTo(16,-40,22,-54); ctx.stroke();
+  // front arm to staff
+  ctx.strokeStyle=robe; ctx.lineWidth=7;
+  ctx.beginPath(); ctx.moveTo(12,-18); ctx.quadraticCurveTo(18,-30,16,-44); ctx.stroke();
+  // staff orb
+  const glow = cast>0 ? (0.7+0.3*Math.sin(time*40)) : (0.5+0.3*Math.sin(time*3));
+  ctx.shadowColor='#9be7ff'; ctx.shadowBlur=18*glow;
+  ctx.fillStyle='#c9f2ff'; ctx.beginPath(); ctx.arc(22,-58,7,0,7); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(20.5,-59.5,2.5,0,7); ctx.fill();
+  // head (chibi big)
+  ctx.fillStyle=skin; ctx.beginPath(); ctx.arc(0,-32,16,0,7); ctx.fill();
+  // hair
+  ctx.fillStyle=hair; ctx.beginPath(); ctx.arc(0,-34,16,Math.PI,0); ctx.fill();
+  ctx.fillRect(-9,-34,5,8); ctx.fillRect(4,-34,5,8); // bangs
+  // eyes / face
+  ctx.fillStyle='#333';
+  ctx.beginPath(); ctx.arc(5,-34,2.4,0,7); ctx.arc(10,-34,2.4,0,7); ctx.fill();
+  ctx.strokeStyle='#c98a5a'; ctx.lineWidth=1.4;
+  ctx.beginPath(); ctx.moveTo(5,-26); ctx.quadraticCurveTo(8,-23,11,-26); ctx.stroke();
+  // hat
+  ctx.fillStyle=hat;
+  ctx.beginPath();
+  ctx.moveTo(-18,-32); ctx.quadraticCurveTo(-20,-58,0,-68); ctx.quadraticCurveTo(20,-58,18,-32);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle=hatDark; ctx.beginPath(); ctx.moveTo(-18,-32); ctx.lineTo(18,-32); ctx.lineTo(15,-40); ctx.lineTo(-15,-40); ctx.closePath(); ctx.fill();
+  // hat band + star
+  ctx.fillStyle='#ffd24d'; ctx.fillRect(-16,-34,32,4);
+  ctx.fillStyle='#ffe14d'; ctx.beginPath();
+  for(let i=0;i<10;i++){ const r=i%2?3:6, a=-Math.PI/2+i*Math.PI/5;
+    const px=r*Math.cos(a), py=r*Math.sin(a)+1; i===0?ctx.moveTo(px,py):ctx.lineTo(px,py); }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawMonster(m){
+  ctx.save();
+  ctx.globalAlpha=Math.max(0,m.fade);
+  if(m.t==='snail') drawSnail(m);
+  else if(m.t==='slime') drawSlime(m);
+  else if(m.t==='mushroom') drawMushroom(m);
+  else drawWraith(m);
+  ctx.restore();
+}
+function drawSnail(m){
+  const x=m.x+m.w/2, y=m.y+m.h;
+  ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
+  const squish = m.onGround? Math.abs(Math.sin(m.anim*6))*3 : 0;
+  // body
+  ctx.fillStyle='#e8a24a';
+  ctx.beginPath(); ctx.ellipse(-6,-20+squish,18,10,0,0,7); ctx.fill();
+  // shell
+  ctx.fillStyle='#5da64a';
+  ctx.beginPath(); ctx.arc(2,-28+squish,15,0,7); ctx.fill();
+  ctx.fillStyle='#4a8a3c';
+  ctx.beginPath(); ctx.arc(2,-30+squish,10,0,7); ctx.fill();
+  ctx.strokeStyle='#3a6e30'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(2,-29+squish,6,0,Math.PI*1.6); ctx.stroke();
+  // eyes on stalks
+  ctx.strokeStyle='#e8a24a'; ctx.lineWidth=4; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-14,-24); ctx.lineTo(-18,-38); ctx.moveTo(-4,-28); ctx.lineTo(-2,-40); ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(-18,-39,4,0,7); ctx.arc(-2,-41,4,0,7); ctx.fill();
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(-18,-39,2,0,7); ctx.arc(-2,-41,2,0,7); ctx.fill();
+  // hit flash
+  if(m.inv>0){ ctx.globalCompositeOperation='source-atop'; ctx.fillStyle='rgba(255,255,255,.6)'; ctx.fillRect(-40,-40,80,80); ctx.globalCompositeOperation='source-over'; }
+  ctx.restore();
+}
+function drawSlime(m){
+  const x=m.x+m.w/2, y=m.y+m.h;
+  ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
+  const hop = Math.abs(Math.sin(m.anim*3));        // 0..1
+  const stretch = 1-0.25*hop;                       // squash on land
+  const shei = 1+0.25*hop;
+  ctx.translate(0, (1-shei)*16);
+  ctx.scale(stretch, shei);
+  ctx.fillStyle='#3fa9ff';
+  ctx.beginPath();
+  ctx.moveTo(-22,0);
+  ctx.quadraticCurveTo(-24,-30,0,-30);
+  ctx.quadraticCurveTo(24,-30,22,0);
+  ctx.quadraticCurveTo(0,8,-22,0);
+  ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.5)';
+  ctx.beginPath(); ctx.ellipse(-8,-24,6,3,-0.4,0,7); ctx.fill();
+  // face
+  ctx.fillStyle='#0b3a66';
+  ctx.beginPath(); ctx.arc(-7,-12,3,0,7); ctx.arc(7,-12,3,0,7); ctx.fill();
+  ctx.strokeStyle='#0b3a66'; ctx.lineWidth=1.6;
+  ctx.beginPath(); ctx.arc(0,-6,4,0.2,Math.PI-0.2); ctx.stroke();
+  ctx.restore();
+}
+function drawMushroom(m){
+  const x=m.x+m.w/2, y=m.y+m.h;
+  ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
+  // stem
+  ctx.fillStyle='#f0d9a8';
+  roundRect(ctx,-12,-34,24,34,6); ctx.fill();
+  // stem face
+  ctx.fillStyle='#333';
+  ctx.beginPath(); ctx.arc(-4,-18,2.6,0,7); ctx.arc(6,-18,2.6,0,7); ctx.fill();
+  ctx.strokeStyle='#333'; ctx.lineWidth=1.8;
+  ctx.beginPath(); ctx.moveTo(-2,-12); ctx.quadraticCurveTo(2,-9,5,-12); ctx.stroke();
+  // cap
+  ctx.fillStyle='#ff7a3c';
+  ctx.beginPath();
+  ctx.moveTo(-26,-30); ctx.quadraticCurveTo(-26,-58,0,-60); ctx.quadraticCurveTo(26,-58,26,-30);
+  ctx.quadraticCurveTo(0,-24,-26,-30); ctx.closePath(); ctx.fill();
+  // spots
+  ctx.fillStyle='#ffe9d2';
+  ctx.beginPath(); ctx.arc(-12,-46,4,0,7); ctx.arc(10,-50,3.4,0,7); ctx.arc(2,-42,2.6,0,7); ctx.fill();
+  ctx.restore();
+}
+function drawWraith(m){
+  const x=m.x+m.w/2, y=m.y+m.h;
+  ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
+  const wave=Math.sin(time*3+m.x*.02)*4;
+  ctx.fillStyle='rgba(140,60,200,.85)';
+  ctx.beginPath();
+  ctx.moveTo(-20,-44);
+  ctx.quadraticCurveTo(-22,-56,0,-58);
+  ctx.quadraticCurveTo(22,-56,20,-44);
+  ctx.lineTo(22,0);
+  ctx.quadraticCurveTo(10,wave,0,4);
+  ctx.quadraticCurveTo(-10,wave,-18,0);
+  ctx.closePath(); ctx.fill();
+  // robe highlight
+  ctx.fillStyle='rgba(200,150,255,.35)';
+  ctx.beginPath(); ctx.moveTo(8,-34); ctx.lineTo(14,-20); ctx.lineTo(8,-6); ctx.lineTo(4,-16); ctx.closePath(); ctx.fill();
+  // angry eyes
+  ctx.fillStyle='#2a0f3a';
+  ctx.beginPath(); ctx.arc(-7,-42,3.4,0,7); ctx.arc(7,-42,3.4,0,7); ctx.fill();
+  ctx.fillStyle='#ff6a6a';
+  ctx.beginPath(); ctx.arc(-7,-44,1.4,0,7); ctx.arc(7,-44,1.4,0,7); ctx.fill();
+  ctx.strokeStyle='#2a0f3a'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(-13,-50); ctx.lineTo(-3,-45); ctx.moveTo(13,-50); ctx.lineTo(3,-45); ctx.stroke();
+  ctx.restore();
+}
+
+// ---------------- Player draw ----------------
+function drawPlayer(){
+  let st=0;
+  if(!player.onGround) st=2; else if(Math.abs(player.vx)>40) st=1;
+  // invincibility flicker
+  if(player.inv>0 && Math.floor(time*20)%2===0) ctx.globalAlpha=0.5;
+  drawWizard(player.x, player.y, player.face, st, player.anim, player.cast, player.w, player.h);
+  ctx.globalAlpha=1;
+  // cast sparkle
+  if(player.cast>0){
+    const px=player.x+player.w/2+player.face*30, py=player.y+14;
+    ctx.fillStyle='rgba(155,231,255,1)'; ctx.beginPath(); ctx.arc(px,py,8,0,7); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,.9)'; ctx.beginPath(); ctx.arc(px,py,3.5,0,7); ctx.fill();
+  }
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
