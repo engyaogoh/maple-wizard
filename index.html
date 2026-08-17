@@ -26,6 +26,35 @@ const cv = document.getElementById('game');
 const ctx = cv.getContext('2d');
 const W = cv.width, H = cv.height;
 
+// ---------------- Sprites (Agnes AI art, transparent PNGs) ----------------
+// Each sprite is drawn when loaded; procedural drawing remains as fallback.
+// ponytail: single Image per actor, no preloading manager — add once a real
+// loader (progress bar, async manifest) is needed.
+const SPRITE = {};
+{ const defs = { wizard:'img/wizard.png', snail:'img/snail.png', slime:'img/slime.png',
+                 mushroom:'img/mushroom.png', wraith:'img/wraith.png' };
+  for(const k in defs){
+    const im = new Image();
+    im.onload = ()=> SPRITE[k]=im;
+    im.onerror = ()=> { /* fall back to procedural drawing */ };
+    im.src = defs[k];
+  }
+}
+// Draw actor sprite (transparent PNG) centered at (cx, bottomY), scaled to fit
+// a target height, flipped by face. Returns true if a sprite was drawn.
+function drawSprite(name, cx, bottomY, h, face){
+  const im = SPRITE[name];
+  if(!im || !im.width) return false;
+  const s = h / im.height;
+  const w = im.width * s;
+  ctx.save();
+  ctx.translate(cx, bottomY);
+  ctx.scale(face, 1);
+  ctx.drawImage(im, -w/2, -h, w, h);
+  ctx.restore();
+  return true;
+}
+
 // ---------------- Input ----------------
 const keys = {};
 addEventListener('keydown', e=>{ keys[e.code]=true; onKey(e.code); if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault(); });
@@ -569,6 +598,8 @@ function drawMenu(){
 // x,y = top-left of sprite box. face: 1 right, -1 left
 function drawWizard(x,y,face,state,anim,cast,w,h){
   ctx.save();
+  // Agnes sprite replaces procedural art when loaded
+  if(drawSprite('wizard', x+w/2, y+h, h, face)){ ctx.restore(); return; }
   ctx.translate(x+w/2, y+h);
   ctx.scale(face,1);
   // state: 0 idle,1 run,2 jump
@@ -641,6 +672,7 @@ function drawMonster(m){
 }
 function drawSnail(m){
   const x=m.x+m.w/2, y=m.y+m.h;
+  if(drawSprite('snail', x, y, m.h+6, m.face)) return;
   ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
   const squish = m.onGround? Math.abs(Math.sin(m.anim*6))*3 : 0;
   // body
@@ -664,6 +696,7 @@ function drawSnail(m){
 }
 function drawSlime(m){
   const x=m.x+m.w/2, y=m.y+m.h;
+  if(drawSprite('slime', x, y, m.h+6, m.face)) return;
   ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
   const hop = Math.abs(Math.sin(m.anim*3));        // 0..1
   const stretch = 1-0.25*hop;                       // squash on land
@@ -688,6 +721,7 @@ function drawSlime(m){
 }
 function drawMushroom(m){
   const x=m.x+m.w/2, y=m.y+m.h;
+  if(drawSprite('mushroom', x, y, m.h+6, m.face)) return;
   ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
   // stem
   ctx.fillStyle='#f0d9a8';
@@ -709,6 +743,7 @@ function drawMushroom(m){
 }
 function drawWraith(m){
   const x=m.x+m.w/2, y=m.y+m.h;
+  if(drawSprite('wraith', x, y, m.h+6, m.face)) return;
   ctx.save(); ctx.translate(x,y); ctx.scale(m.face,1);
   const wave=Math.sin(time*3+m.x*.02)*4;
   ctx.fillStyle='rgba(140,60,200,.85)';
