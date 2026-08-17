@@ -485,9 +485,9 @@ function drawBackground(L){
     ctx.fillStyle=th.hill2; roundedHill(hx-350, camY+330, 700,150);
     ctx.fillStyle=th.hill;  roundedHill(hx-180+100, camY+350, 620,130);
   }
-  // trees
+  // trees (same parallax layer as the distant hills — part of the mountain)
   for(let rep=-1; rep<3; rep++){
-    const tx = camX*0.3 + rep*420;
+    const tx = camX*0.15 + rep*420;
     drawTree(camX+tx, camY+300, 90, th.tree);
   }
   // ground fill
